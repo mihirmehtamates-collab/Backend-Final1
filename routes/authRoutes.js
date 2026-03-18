@@ -16,6 +16,7 @@ const {
     verifyOTP,           
     resetPassword        
 } = require('../controllers/authController');
+const { updateUser, deleteUser } = require('../controllers/userController');
 const { protect, authorize } = require('../middleware/authMiddleware');
 
 // Public routes
@@ -36,5 +37,7 @@ router.put('/approve/:userId', protect, authorize('admin', 'sub-admin'), approve
 router.put('/reject/:userId', protect, authorize('admin', 'sub-admin'), rejectUser);
 router.put('/bulk-approve', protect, authorize('admin', 'sub-admin'), bulkApprove);
 router.put('/bulk-reject', protect, authorize('admin', 'sub-admin'), bulkReject);
+router.put('/users/:id', protect, authorize('admin', 'sub-admin'), updateUser);
+router.delete('/users/:id', protect, authorize('admin', 'sub-admin'), deleteUser);
 
 module.exports = router;

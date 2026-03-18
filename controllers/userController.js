@@ -1,16 +1,27 @@
 const User = require('../models/User'); // Adjust if required
 const Product = require('../models/Product');
 const Branch = require('../models/Branch');
+const CompanyUser = require('../models/CompanyUser');
 
 // @desc    Update user profile (Admin Portal)
 // @route   PUT /api/auth/users/:id
 // @access  Private/Admin
 exports.updateUser = async (req, res) => {
     try {
-        const { name, email, companyLocation, vendorLocation } = req.body;
+        const { name, email, companyLocation, vendorLocation, gstNumber, panCard, isActive } = req.body;
+        
+        const updateData = {};
+        if (name) updateData.name = name;
+        if (email) updateData.email = email;
+        if (companyLocation !== undefined) updateData.companyLocation = companyLocation;
+        if (vendorLocation !== undefined) updateData.vendorLocation = vendorLocation;
+        if (gstNumber !== undefined) updateData.gstNumber = gstNumber;
+        if (panCard !== undefined) updateData.panCard = panCard;
+        if (isActive !== undefined) updateData.isActive = isActive;
+        
         const updatedUser = await User.findByIdAndUpdate(
             req.params.id,
-            { name, email, companyLocation, vendorLocation },
+            updateData,
             { new: true, runValidators: true }
         );
 
@@ -40,6 +51,7 @@ exports.deleteUser = async (req, res) => {
             await Product.deleteMany({ vendor: user._id });
         } else if (user.role === 'company') {
             await Branch.deleteMany({ company: user._id });
+            await CompanyUser.deleteMany({ company: user._id });
         }
 
         await user.deleteOne();
