@@ -7,6 +7,7 @@ const Category = require('../models/Category');
 const SubCategory = require('../models/SubCategory');
 const Order = require('../models/Order');
 const DeliveryPartner = require('../models/DeliveryPartner');
+const DeliveryChallan = require('../models/DeliveryChallan');
 const Cart = require('../models/Cart');
 const bcrypt = require('bcryptjs');
 const { sendCredentialsEmail } = require('../utils/emailService');
