@@ -2,6 +2,76 @@ const Cart = require('../models/Cart');
 const Product = require('../models/Product');
 const CompanyUser = require('../models/CompanyUser');
 
+const parseQuantityValue = (value) => {
+    const parsedValue = Number(value);
+
+    if (!Number.isInteger(parsedValue) || parsedValue < 1) {
+        return null;
+    }
+
+    return parsedValue;
+};
+
+const populateCart = async (cart) => {
+    await cart.populate({
+        path: 'items.product',
+        select: 'productName sku brand price images category subCategory status approvalStatus',
+        populate: [
+            { path: 'category', select: 'name' },
+            { path: 'subCategory', select: 'name' }
+        ]
+    });
+};
+
+const findOrCreateCart = async (req) => {
+    let cart = await Cart.findOne({ user: req.user.id });
+
+    if (!cart) {
+        cart = new Cart({
+            user: req.user.id,
+            company: req.user.companyId,
+            items: []
+        });
+    }
+
+    return cart;
+};
+
+const validateCartProduct = async (productId) => {
+    const product = await Product.findById(productId);
+
+    if (!product) {
+        return { error: 'Product not found', statusCode: 404 };
+    }
+
+    if (product.status !== 'active') {
+        return { error: 'Product is not available', statusCode: 400 };
+    }
+
+    if (product.approvalStatus !== 'approved') {
+        return { error: 'Product is not approved for ordering', statusCode: 400 };
+    }
+
+    return { product };
+};
+
+const addOrUpdateCartItem = (cart, productId, quantity, price) => {
+    const existingItemIndex = cart.items.findIndex(
+        item => item.product.toString() === productId.toString()
+    );
+
+    if (existingItemIndex > -1) {
+        cart.items[existingItemIndex].quantity += quantity;
+        cart.items[existingItemIndex].price = price;
+    } else {
+        cart.items.push({
+            product: productId,
+            quantity,
+            price
+        });
+    }
+};
+
 // @desc    Get user's cart
 // @route   GET /api/cart
 // @access  Private/Company Users
@@ -46,6 +116,7 @@ exports.getCart = async (req, res) => {
 exports.addToCart = async (req, res) => {
     try {
         const { productId, quantity = 1 } = req.body;
+        const parsedQuantity = parseQuantityValue(quantity);
 
         // Validate input
         if (!productId) {
@@ -55,75 +126,28 @@ exports.addToCart = async (req, res) => {
             });
         }
 
-        if (quantity < 1) {
+        if (parsedQuantity === null) {
             return res.status(400).json({
                 success: false,
-                message: 'Quantity must be at least 1'
+                message: 'Quantity must be a whole number greater than or equal to 1'
             });
         }
 
         // Check if product exists and is approved
-        const product = await Product.findById(productId);
-        if (!product) {
-            return res.status(404).json({
+        const { product, error, statusCode } = await validateCartProduct(productId);
+        if (error) {
+            return res.status(statusCode).json({
                 success: false,
-                message: 'Product not found'
-            });
-        }
-
-        if (product.status !== 'active') {
-            return res.status(400).json({
-                success: false,
-                message: 'Product is not available'
-            });
-        }
-
-        if (product.approvalStatus !== 'approved') {
-            return res.status(400).json({
-                success: false,
-                message: 'Product is not approved for ordering'
+                message: error
             });
         }
 
         // Find or create cart
-        let cart = await Cart.findOne({ user: req.user.id });
-        
-        if (!cart) {
-            cart = new Cart({
-                user: req.user.id,
-                company: req.user.companyId,
-                items: []
-            });
-        }
-
-        // Check if product already exists in cart
-        const existingItemIndex = cart.items.findIndex(
-            item => item.product.toString() === productId
-        );
-
-        if (existingItemIndex > -1) {
-            // Update quantity if product exists
-            cart.items[existingItemIndex].quantity += quantity;
-        } else {
-            // Add new item to cart
-            cart.items.push({
-                product: productId,
-                quantity: quantity,
-                price: product.price
-            });
-        }
+        const cart = await findOrCreateCart(req);
+        addOrUpdateCartItem(cart, productId, parsedQuantity, product.price);
 
         await cart.save();
-
-        // Populate product details
-        await cart.populate({
-            path: 'items.product',
-            select: 'productName sku brand price images category subCategory',
-            populate: [
-                { path: 'category', select: 'name' },
-                { path: 'subCategory', select: 'name' }
-            ]
-        });
+        await populateCart(cart);
 
         res.status(200).json({
             success: true,
@@ -132,6 +156,74 @@ exports.addToCart = async (req, res) => {
         });
     } catch (error) {
         console.error('Add to cart error:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Server error',
+            error: error.message
+        });
+    }
+};
+
+// @desc    Add multiple products to cart in one request
+// @route   POST /api/cart/add-bulk
+// @access  Private/Company Users
+exports.addBulkToCart = async (req, res) => {
+    try {
+        const { items } = req.body;
+
+        if (!Array.isArray(items) || items.length === 0) {
+            return res.status(400).json({
+                success: false,
+                message: 'Items array is required'
+            });
+        }
+
+        const cart = await findOrCreateCart(req);
+        const validationErrors = [];
+
+        for (const item of items) {
+            const productId = item?.productId;
+            const parsedQuantity = parseQuantityValue(item?.quantity);
+
+            if (!productId || parsedQuantity === null) {
+                validationErrors.push({
+                    productId: productId || null,
+                    message: 'Each item must include a valid productId and quantity'
+                });
+                continue;
+            }
+
+            const { product, error } = await validateCartProduct(productId);
+            if (error) {
+                validationErrors.push({
+                    productId,
+                    message: error
+                });
+                continue;
+            }
+
+            addOrUpdateCartItem(cart, productId, parsedQuantity, product.price);
+        }
+
+        if (validationErrors.length === items.length) {
+            return res.status(400).json({
+                success: false,
+                message: 'No valid products were added to cart',
+                errors: validationErrors
+            });
+        }
+
+        await cart.save();
+        await populateCart(cart);
+
+        res.status(200).json({
+            success: true,
+            message: 'Products added to cart successfully',
+            data: cart,
+            errors: validationErrors
+        });
+    } catch (error) {
+        console.error('Bulk add to cart error:', error);
         res.status(500).json({
             success: false,
             message: 'Server error',
@@ -171,15 +263,7 @@ exports.removeFromCart = async (req, res) => {
 
         await cart.save();
 
-        // Populate product details
-        await cart.populate({
-            path: 'items.product',
-            select: 'productName sku brand price images category subCategory',
-            populate: [
-                { path: 'category', select: 'name' },
-                { path: 'subCategory', select: 'name' }
-            ]
-        });
+        await populateCart(cart);
 
         res.status(200).json({
             success: true,
@@ -233,37 +317,30 @@ exports.updateCartItemQuantity = async (req, res) => {
             });
         }
 
+        const parsedQuantity = quantity === undefined ? 1 : parseQuantityValue(quantity);
+        if (parsedQuantity === null) {
+            return res.status(400).json({
+                success: false,
+                message: 'Quantity must be a whole number greater than or equal to 1'
+            });
+        }
+
         // Update quantity based on action
         if (action === 'increment') {
-            cart.items[itemIndex].quantity += 1;
+            cart.items[itemIndex].quantity += parsedQuantity;
         } else if (action === 'decrement') {
-            if (cart.items[itemIndex].quantity <= 1) {
+            if (cart.items[itemIndex].quantity <= parsedQuantity) {
                 // Remove item if quantity would be 0
                 cart.items.splice(itemIndex, 1);
             } else {
-                cart.items[itemIndex].quantity -= 1;
+                cart.items[itemIndex].quantity -= parsedQuantity;
             }
         } else if (action === 'set') {
-            if (!quantity || quantity < 1) {
-                return res.status(400).json({
-                    success: false,
-                    message: 'Quantity must be at least 1'
-                });
-            }
-            cart.items[itemIndex].quantity = quantity;
+            cart.items[itemIndex].quantity = parsedQuantity;
         }
 
         await cart.save();
-
-        // Populate product details
-        await cart.populate({
-            path: 'items.product',
-            select: 'productName sku brand price images category subCategory',
-            populate: [
-                { path: 'category', select: 'name' },
-                { path: 'subCategory', select: 'name' }
-            ]
-        });
+        await populateCart(cart);
 
         res.status(200).json({
             success: true,

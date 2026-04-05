@@ -3,6 +3,7 @@ const router = express.Router();
 const {
     getCart,
     addToCart,
+    addBulkToCart,
     removeFromCart,
     updateCartItemQuantity,
     clearCart
@@ -22,6 +23,11 @@ router.get('/', getCart);
 // @desc    Add product to cart
 // @access  Private/Company Users
 router.post('/add', addToCart);
+
+// @route   POST /api/cart/add-bulk
+// @desc    Add multiple products to cart
+// @access  Private/Company Users
+router.post('/add-bulk', addBulkToCart);
 
 // @route   PATCH /api/cart/update/:productId
 // @desc    Update product quantity in cart

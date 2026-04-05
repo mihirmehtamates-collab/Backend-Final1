@@ -5,6 +5,29 @@ const Order = require('../models/Order'); // Required to aggregate revenue
 const mongoose = require('mongoose');
 const { uploadMultipleImagesToCloudinary, deleteMultipleImagesFromCloudinary } = require('../utils/imageUpload');
 
+const ALLOWED_GST_SLABS = [0, 5, 12, 18, 28];
+
+const parsePositiveNumber = (value) => {
+    if (value === undefined || value === null || value === '') {
+        return null;
+    }
+
+    const parsedValue = Number(value);
+    return Number.isFinite(parsedValue) ? parsedValue : null;
+};
+
+const calculateVendorGstBreakdown = (vendorPrice, gstSlab) => {
+    const gstAmount = Number(((vendorPrice * gstSlab) / 100).toFixed(2));
+    const priceWithGst = Number((vendorPrice + gstAmount).toFixed(2));
+
+    return {
+        vendorPrice: Number(vendorPrice.toFixed(2)),
+        gstSlab: Number(gstSlab.toFixed(2)),
+        gstAmount,
+        priceWithGst
+    };
+};
+
 // @desc    Create product (Vendor only)
 // @route   POST /api/products
 // @access  Private/Vendor
@@ -15,6 +38,7 @@ exports.createProduct = async (req, res) => {
             brand,
             productName,
             description,
+            vendorPrice,
             price,
             weight,
             dimensions,
@@ -28,11 +52,29 @@ exports.createProduct = async (req, res) => {
             subCategoryId
         } = req.body;
 
+        const vendorPriceInput = vendorPrice ?? price;
+
         // Validate required fields
-        if (!sku || !brand || !productName || !description || !price || !hsnCode || !categoryId || !subCategoryId) {
+        if (!sku || !brand || !productName || !description || vendorPriceInput === undefined || vendorPriceInput === null || vendorPriceInput === '' || gstSlab === undefined || gstSlab === null || gstSlab === '' || !hsnCode || !categoryId || !subCategoryId) {
             return res.status(400).json({
                 success: false,
                 message: 'Please provide all required fields'
+            });
+        }
+
+        const vendorPriceNum = parsePositiveNumber(vendorPriceInput);
+        if (vendorPriceNum === null || vendorPriceNum < 0) {
+            return res.status(400).json({
+                success: false,
+                message: 'Vendor price must be a valid non-negative number'
+            });
+        }
+
+        const gstSlabNum = parsePositiveNumber(gstSlab);
+        if (gstSlabNum === null || !ALLOWED_GST_SLABS.includes(gstSlabNum)) {
+            return res.status(400).json({
+                success: false,
+                message: `GST slab must be one of: ${ALLOWED_GST_SLABS.join(', ')}`
             });
         }
 
@@ -89,11 +131,8 @@ exports.createProduct = async (req, res) => {
         // Parse dimensions (JSON string to object)
         const dimensionsData = typeof dimensions === 'string' ? JSON.parse(dimensions) : dimensions;
 
-        // Calculate GST amount
-        const vendorPriceNum = parseFloat(price);
-        const gstSlabNum = parseFloat(gstSlab);
-        const calculatedGstAmount = (vendorPriceNum * gstSlabNum) / 100;
-        const priceWithGst = vendorPriceNum + calculatedGstAmount;
+        // Calculate GST on the vendor base price
+        const priceBreakdown = calculateVendorGstBreakdown(vendorPriceNum, gstSlabNum);
 
         // Allow Admin to provide a specific vendorId or leave blank for Admin-owned products
         let finalVendorId = req.user.id;
@@ -113,17 +152,17 @@ exports.createProduct = async (req, res) => {
             brand,
             productName,
             description,
-            vendorPrice: vendorPriceNum,
+            vendorPrice: priceBreakdown.vendorPrice,
             adminCut: 0,
-            gstAmount: calculatedGstAmount,
-            price: priceWithGst, // Vendor price + GST
+            gstAmount: priceBreakdown.gstAmount,
+            price: priceBreakdown.priceWithGst,
             weight: weightData,
             dimensions: dimensionsData,
             color,
             material,
             packSize,
             uom,
-            gstSlab: gstSlabNum,
+            gstSlab: priceBreakdown.gstSlab,
             hsnCode,
             images: uploadedImages,
             category: categoryId,
@@ -146,10 +185,10 @@ exports.createProduct = async (req, res) => {
             message: 'Product created successfully and submitted for approval',
             data: product,
             priceBreakdown: {
-                vendorPrice: product.vendorPrice,
-                gstSlab: `${product.gstSlab}%`,
-                gstAmount: product.gstAmount,
-                priceWithGst: product.price,
+                vendorPrice: priceBreakdown.vendorPrice,
+                gstSlab: `${priceBreakdown.gstSlab}%`,
+                gstAmount: priceBreakdown.gstAmount,
+                priceWithGst: priceBreakdown.priceWithGst,
                 adminCut: product.adminCut,
                 finalPrice: product.price
             }
@@ -174,6 +213,7 @@ exports.updateProduct = async (req, res) => {
             brand,
             productName,
             description,
+            vendorPrice,
             price,
             weight,
             dimensions,
@@ -187,6 +227,8 @@ exports.updateProduct = async (req, res) => {
             subCategoryId,
             removeImages // Array of publicIds to remove
         } = req.body;
+
+        const vendorPriceInput = vendorPrice ?? price;
 
         // Validate ObjectId
         if (!mongoose.Types.ObjectId.isValid(productId)) {
@@ -253,8 +295,16 @@ exports.updateProduct = async (req, res) => {
         if (brand) product.brand = brand;
         if (productName) product.productName = productName;
         if (description) product.description = description;
-        if (price) {
-            product.vendorPrice = parseFloat(price);
+        if (vendorPriceInput !== undefined && vendorPriceInput !== null && vendorPriceInput !== '') {
+            const parsedVendorPrice = parsePositiveNumber(vendorPriceInput);
+            if (parsedVendorPrice === null || parsedVendorPrice < 0) {
+                return res.status(400).json({
+                    success: false,
+                    message: 'Vendor price must be a valid non-negative number'
+                });
+            }
+
+            product.vendorPrice = parsedVendorPrice;
         }
         if (weight) product.weight = typeof weight === 'string' ? JSON.parse(weight) : weight;
         if (dimensions) product.dimensions = typeof dimensions === 'string' ? JSON.parse(dimensions) : dimensions;
@@ -262,7 +312,17 @@ exports.updateProduct = async (req, res) => {
         if (material) product.material = material;
         if (packSize) product.packSize = packSize;
         if (uom) product.uom = uom;
-        if (gstSlab !== undefined) product.gstSlab = parseFloat(gstSlab);
+        if (gstSlab !== undefined && gstSlab !== null && gstSlab !== '') {
+            const parsedGstSlab = parsePositiveNumber(gstSlab);
+            if (parsedGstSlab === null || !ALLOWED_GST_SLABS.includes(parsedGstSlab)) {
+                return res.status(400).json({
+                    success: false,
+                    message: `GST slab must be one of: ${ALLOWED_GST_SLABS.join(', ')}`
+                });
+            }
+
+            product.gstSlab = parsedGstSlab;
+        }
         if (hsnCode) product.hsnCode = hsnCode;
         
         // Update category and subCategory with validation
@@ -313,9 +373,10 @@ exports.updateProduct = async (req, res) => {
             product.rejectionReason = undefined;
         }
         
-        // Recalculate GST amount and price (vendor price + GST)
-        product.gstAmount = (product.vendorPrice * product.gstSlab) / 100;
-        product.price = product.vendorPrice + product.gstAmount;
+        // Recalculate vendor GST and preserve admin charges on admin-updated approved products
+        const priceBreakdown = calculateVendorGstBreakdown(product.vendorPrice, product.gstSlab);
+        product.gstAmount = priceBreakdown.gstAmount;
+        product.price = Number((priceBreakdown.priceWithGst + product.adminCut + product.adminGstAmount).toFixed(2));
 
         await product.save();
         await product.populate([
@@ -327,7 +388,16 @@ exports.updateProduct = async (req, res) => {
         res.status(200).json({
             success: true,
             message: 'Product updated successfully and resubmitted for approval',
-            data: product
+            data: product,
+            priceBreakdown: {
+                vendorPrice: priceBreakdown.vendorPrice,
+                gstSlab: `${priceBreakdown.gstSlab}%`,
+                gstAmount: priceBreakdown.gstAmount,
+                priceWithGst: priceBreakdown.priceWithGst,
+                adminCut: product.adminCut,
+                adminGstAmount: product.adminGstAmount,
+                finalPrice: product.price
+            }
         });
     } catch (error) {
         console.error('Update product error:', error);

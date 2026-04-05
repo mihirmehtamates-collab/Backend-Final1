@@ -7,6 +7,14 @@ const razorpayInstance = require('../config/razorpay');
 const crypto = require('crypto');
 const mongoose = require('mongoose');
 
+const calculateRequiredMonthlyLimit = (user, orderAmount) => {
+    if (user.role === 'super-admin') {
+        return null;
+    }
+
+    return Number((user.monthlySpent + orderAmount).toFixed(2));
+};
+
 // @desc    Place order from cart
 // @route   POST /api/orders/place
 // @access  Private/Company Users
@@ -188,15 +196,8 @@ exports.verifyPayment = async (req, res) => {
         order.payment.paidAt = Date.now();
         await order.save();
 
-        // Update monthly spent
-        // For escalated orders, update the approver's (orderPlacedBy) monthly spent
-        // For regular orders, update the orderedBy's monthly spent
-        let userToUpdate;
-        if (order.wasEscalated) {
-            userToUpdate = await CompanyUser.findById(order.orderPlacedBy);
-        } else {
-            userToUpdate = await CompanyUser.findById(order.orderedBy);
-        }
+        // Update monthly spent for the actual requester/order owner.
+        const userToUpdate = await CompanyUser.findById(order.orderedBy);
         
         if (userToUpdate) {
             userToUpdate.monthlySpent += order.totalAmount;
@@ -658,7 +659,7 @@ exports.getSentEscalations = async (req, res) => {
 exports.approveEscalation = async (req, res) => {
     try {
         const { escalationId } = req.params;
-        const { responseMessage } = req.body;
+        const { responseMessage, approvedMonthlyLimit } = req.body;
 
         const escalation = await OrderEscalation.findById(escalationId)
             .populate('requestedBy', 'name email role')
@@ -701,32 +702,50 @@ exports.approveEscalation = async (req, res) => {
             });
         }
 
-        // Get the approver
-        const approver = await CompanyUser.findById(req.user.id);
         const orderAmount = escalation.totalAmount;
 
-        // Check if approver can place this order
-        const limitCheck = await approver.canPlaceOrder(orderAmount);
-
-        if (!limitCheck.canOrder && !limitCheck.exceedsLimit && limitCheck.needsLimit) {
-            return res.status(403).json({
+        // Get requester's branch
+        const requester = await CompanyUser.findById(escalation.requestedBy._id);
+        if (!requester) {
+            return res.status(404).json({
                 success: false,
-                message: 'You do not have a monthly limit set.'
+                message: 'Escalation requester not found'
             });
         }
 
-        if (!limitCheck.canOrder && limitCheck.exceedsLimit) {
-            return res.status(403).json({
+        await requester.checkAndResetMonthlySpending();
+
+        const requiredMonthlyLimit = calculateRequiredMonthlyLimit(requester, orderAmount);
+        const parsedApprovedMonthlyLimit = approvedMonthlyLimit === undefined || approvedMonthlyLimit === null || approvedMonthlyLimit === ''
+            ? null
+            : Number(approvedMonthlyLimit);
+
+        if (parsedApprovedMonthlyLimit !== null && (!Number.isFinite(parsedApprovedMonthlyLimit) || parsedApprovedMonthlyLimit < 0)) {
+            return res.status(400).json({
                 success: false,
-                message: 'This order exceeds your monthly limit as well. You cannot approve it.',
-                limitInfo: {
-                    monthlyLimit: approver.monthlyLimit,
-                    monthlySpent: approver.monthlySpent,
-                    remainingLimit: limitCheck.remainingLimit,
-                    orderAmount: orderAmount,
-                    exceedsBy: orderAmount - limitCheck.remainingLimit
-                }
+                message: 'Approved monthly limit must be a valid non-negative number'
             });
+        }
+
+        // Approval should extend the requester limit, not consume/check the approver's limit.
+        if (requester.role !== 'super-admin') {
+            const finalApprovedMonthlyLimit = parsedApprovedMonthlyLimit ?? requiredMonthlyLimit;
+
+            if (finalApprovedMonthlyLimit < requiredMonthlyLimit) {
+                return res.status(400).json({
+                    success: false,
+                    message: 'Approved monthly limit must be enough to cover the current monthly spend plus this order',
+                    limitInfo: {
+                        currentMonthlyLimit: requester.monthlyLimit,
+                        monthlySpent: requester.monthlySpent,
+                        orderAmount,
+                        minimumRequiredLimit: requiredMonthlyLimit
+                    }
+                });
+            }
+
+            requester.monthlyLimit = finalApprovedMonthlyLimit;
+            await requester.save();
         }
 
         // Validate products are still available
@@ -738,9 +757,6 @@ exports.approveEscalation = async (req, res) => {
                 });
             }
         }
-
-        // Get requester's branch
-        const requester = await CompanyUser.findById(escalation.requestedBy._id);
 
         // Group escalation items by vendor
         const itemsByVendor = {};
@@ -777,7 +793,8 @@ exports.approveEscalation = async (req, res) => {
                     escalatedFrom: escalation.requestedBy._id,
                     escalatedTo: req.user.id,
                     escalationLevel: escalation.escalationType
-                }
+                },
+                notes: responseMessage
             });
 
             // Populate order details
@@ -814,7 +831,12 @@ exports.approveEscalation = async (req, res) => {
             data: {
                 escalation,
                 orders: createdOrders,
-                orderCount: createdOrders.length
+                orderCount: createdOrders.length,
+                requesterLimit: requester.role === 'super-admin' ? null : {
+                    monthlyLimit: requester.monthlyLimit,
+                    monthlySpent: requester.monthlySpent,
+                    remainingLimit: requester.monthlyLimit - requester.monthlySpent
+                }
             }
         });
     } catch (error) {
