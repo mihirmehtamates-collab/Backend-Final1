@@ -3,7 +3,7 @@ const OrderEscalation = require('../models/OrderEscalation');
 const Cart = require('../models/Cart');
 const CompanyUser = require('../models/CompanyUser');
 const Product = require('../models/Product');
-const razorpayInstance = require('../config/razorpay');
+const getRazorpayInstance = require('../config/razorpay');
 const crypto = require('crypto');
 const mongoose = require('mongoose');
 
@@ -237,6 +237,7 @@ exports.verifyPayment = async (req, res) => {
 // @access  Private/All authenticated users
 exports.checkPaymentStatus = async (req, res) => {
     try {
+        const razorpayInstance = getRazorpayInstance();
         const { orderId } = req.params;
         const User = require('../models/User');
 

@@ -4,7 +4,7 @@ const DeliveryChallan = require('../models/DeliveryChallan');
 const User = require('../models/User');
 const CompanyUser = require('../models/CompanyUser');
 const Product = require('../models/Product');
-const razorpayInstance = require('../config/razorpay');
+const getRazorpayInstance = require('../config/razorpay');
 const { amountToWords } = require('../utils/numberToWords');
 
 // @desc    Create invoice for an order
@@ -12,6 +12,7 @@ const { amountToWords } = require('../utils/numberToWords');
 // @access  Private/Admin only
 exports.createInvoice = async (req, res) => {
     try {
+        const razorpayInstance = getRazorpayInstance();
         const { orderId, notes } = req.body;
 
         // Check if user is admin or sub-admin
